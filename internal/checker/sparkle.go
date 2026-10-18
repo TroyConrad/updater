@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -42,6 +43,32 @@ type sparkleEnclosure struct {
 	Type               string `xml:"type,attr"`
 	Version            string `xml:"http://www.andymatuschak.org/xml-namespaces/sparkle version,attr"`
 	ShortVersionString string `xml:"http://www.andymatuschak.org/xml-namespaces/sparkle shortVersionString,attr"`
+}
+
+// buildVersion is Sparkle's machine-readable version (CFBundleVersion).
+func (item sparkleItem) buildVersion() string {
+	if item.Enclosure.Version != "" {
+		return item.Enclosure.Version
+	}
+	return item.Version
+}
+
+func (item sparkleItem) displayVersion() string {
+	if item.Enclosure.ShortVersionString != "" {
+		return item.Enclosure.ShortVersionString
+	}
+	if item.ShortVersionString != "" {
+		return item.ShortVersionString
+	}
+	return item.buildVersion()
+}
+
+// Some feeds include a build in their human-readable short version, e.g.
+// "1.168.0 (88413)". Remove only that numeric suffix when comparing releases.
+var sparkleBuildSuffix = regexp.MustCompile(`\s+\([0-9]+(?:\.[0-9]+)*\)$`)
+
+func sparkleReleaseVersion(v string) string {
+	return sparkleBuildSuffix.ReplaceAllString(strings.TrimSpace(v), "")
 }
 
 // SparkleChecker checks for updates via Sparkle appcast feeds.
@@ -116,24 +143,23 @@ func (s *SparkleChecker) Check(ctx context.Context, a *app.App) (*UpdateResult, 
 		}, nil
 	}
 
-	// Extract version: prefer enclosure attributes (most common in real feeds),
-	// fall back to item child elements.
-	latestVersion := item.Enclosure.ShortVersionString
-	if latestVersion == "" {
-		latestVersion = item.ShortVersionString
-	}
-	if latestVersion == "" {
-		latestVersion = item.Enclosure.Version
-	}
-	if latestVersion == "" {
-		latestVersion = item.Version
+	latestVersion := item.displayVersion()
+	current, latest := sparkleReleaseVersion(a.Version), sparkleReleaseVersion(latestVersion)
+	major := version.IsMajorUpgrade(current, latest)
+	// Sparkle compares sparkle:version with CFBundleVersion; the short version
+	// is for display. Fall back to release versions only when a build is missing.
+	if build := item.buildVersion(); a.Build != "" && build != "" {
+		current, latest = a.Build, build
+		if item.Enclosure.ShortVersionString == "" && item.ShortVersionString == "" {
+			major = version.IsMajorUpgrade(current, latest)
+		}
 	}
 
-	hasUpdate := version.IsNewer(a.Version, latestVersion)
+	hasUpdate := version.IsNewer(current, latest)
 
 	// Detect stale feed: if the feed's latest is older than installed,
 	// the feed is likely abandoned (e.g., PDF Expert Sparkle returns v2.x for v3.x installs).
-	stale := !hasUpdate && latestVersion != "" && version.IsNewer(latestVersion, a.Version)
+	stale := !hasUpdate && latest != "" && version.IsNewer(latest, current)
 
 	return &UpdateResult{
 		App:            a,
@@ -143,7 +169,7 @@ func (s *SparkleChecker) Check(ctx context.Context, a *app.App) (*UpdateResult, 
 		DownloadURL:    item.Enclosure.URL,
 		ReleaseNotes:   item.ReleaseNotesLink,
 		HasUpdate:      hasUpdate,
-		IsMajorUpdate:  version.IsMajorUpgrade(a.Version, latestVersion),
+		IsMajorUpdate:  hasUpdate && major,
 		StaleSource:    stale,
 	}, nil
 }
@@ -153,7 +179,6 @@ func (s *SparkleChecker) Check(ctx context.Context, a *app.App) (*UpdateResult, 
 // It returns a zero item if no release is compatible.
 func findBestItem(items []sparkleItem, macOSVersion string) sparkleItem {
 	var best sparkleItem
-	bestVersion := ""
 	bestScore := 0
 
 	for _, item := range items {
@@ -173,22 +198,18 @@ func findBestItem(items []sparkleItem, macOSVersion string) sparkleItem {
 			}
 		}
 
-		// Get this item's version
-		v := item.Enclosure.ShortVersionString
-		if v == "" {
-			v = item.ShortVersionString
-		}
-		if v == "" {
-			v = item.Enclosure.Version
-		}
-		if v == "" {
-			v = item.Version
+		// Rank by the machine-readable build, including releases with identical
+		// short versions. If either item lacks a build, compare both releases
+		// instead of comparing a release number with an internal build counter.
+		bestVersion, v := best.buildVersion(), item.buildVersion()
+		if bestVersion == "" || v == "" {
+			bestVersion = sparkleReleaseVersion(best.displayVersion())
+			v = sparkleReleaseVersion(item.displayVersion())
 		}
 
 		if bestVersion == "" || version.IsNewer(bestVersion, v) || v == bestVersion && score > bestScore {
 			bestScore = score
 			best = item
-			bestVersion = v
 		}
 	}
 

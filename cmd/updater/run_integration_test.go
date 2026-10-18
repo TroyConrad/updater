@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -88,6 +89,70 @@ func TestRunCheckEndToEnd(t *testing.T) {
 	}
 	if fresh := byName["FreshApp"]; fresh.Status != "ok" {
 		t.Errorf("FreshApp status = %q, want ok", fresh.Status)
+	}
+}
+
+// Issue #12: matching Sparkle builds and matching/older Office casks must stay
+// out of both check's update statuses and update --all --dry-run's install plan.
+func TestRunCommands_CurrentBuilds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("UPDATER_AGENT_MODE", "1")
+	t.Setenv("GITHUB_TOKEN", "")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		short, build := "1.168.0", "88413"
+		if r.URL.Path == "/dia" {
+			short, build = "1.52.0", "88431"
+		}
+		fmt.Fprintf(w, `<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item><sparkle:version>%s</sparkle:version><sparkle:shortVersionString>%s (%s)</sparkle:shortVersionString><enclosure url="https://example.com/app.zip" /></item></channel></rss>`, build, short, build)
+	}))
+	defer srv.Close()
+
+	withStubbedPipeline(t, []*app.App{
+		{Name: "Arc", Version: "1.168.0", Build: "88413", Source: app.SourceSparkle, FeedURL: srv.URL + "/arc"},
+		{Name: "Dia", Version: "1.52.0", Build: "88431", Source: app.SourceSparkle, FeedURL: srv.URL + "/dia"},
+		{Name: "Microsoft Excel", Version: "16.113.4", Build: "16.113.26100421", CaskName: "microsoft-excel"},
+		{Name: "Microsoft Outlook", Version: "16.113.4", Build: "16.113.26100421", CaskName: "microsoft-outlook"},
+	})
+	newRunner = func() checker.CmdRunner {
+		return &checker.MultiMockCmdRunner{Responses: map[string]checker.MockResponse{
+			"brew info --cask --json=v2 microsoft-excel":   {Output: []byte(`{"casks":[{"version":"16.113.26100421","url":"https://example.com/excel.pkg"}]}`)},
+			"brew info --cask --json=v2 microsoft-outlook": {Output: []byte(`{"casks":[{"version":"16.113.26091740","url":"https://example.com/outlook.pkg"}]}`)},
+		}}
+	}
+
+	var buf bytes.Buffer
+	checkCmd.SetOut(&buf)
+	checkCmd.SetContext(context.Background())
+	t.Cleanup(func() { checkCmd.SetOut(nil) })
+	if err := runCheck(checkCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	var entries []checkEntry
+	if err := json.Unmarshal(buf.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid check output: %v\n%s", err, buf.String())
+	}
+	if len(entries) != 4 {
+		t.Fatalf("got %d check results, want 4", len(entries))
+	}
+	for _, entry := range entries {
+		if entry.Status != "ok" {
+			t.Errorf("%s status = %s, want ok", entry.Name, entry.Status)
+		}
+	}
+
+	origAll, origDryRun, origJSON := flagAll, flagDryRun, flagDryRunJSON
+	flagAll, flagDryRun, flagDryRunJSON = true, true, true
+	t.Cleanup(func() { flagAll, flagDryRun, flagDryRunJSON = origAll, origDryRun, origJSON })
+	buf.Reset()
+	updateCmd.SetOut(&buf)
+	updateCmd.SetContext(context.Background())
+	t.Cleanup(func() { updateCmd.SetOut(nil) })
+	if err := runUpdate(updateCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("All apps are up to date")) {
+		t.Fatalf("unexpected update plan for current builds: %s", buf.String())
 	}
 }
 

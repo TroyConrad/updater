@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -85,16 +87,67 @@ func (b *BrewInfoChecker) Check(ctx context.Context, a *app.App) (*UpdateResult,
 		return nil, fmt.Errorf("failed to parse brew info for %s: %w", a.CaskName, err)
 	}
 
+	currentVersion := caskInstalledVersion(a.Version, a.Build, artifact.Version)
 	return &UpdateResult{
 		App:            a,
 		Source:         "brew-info",
-		CurrentVersion: a.Version,
+		CurrentVersion: currentVersion,
 		LatestVersion:  artifact.Version,
-		HasUpdate:      version.IsNewer(a.Version, artifact.Version),
-		IsMajorUpdate:  version.IsMajorUpgrade(a.Version, artifact.Version),
+		HasUpdate:      version.IsNewer(currentVersion, artifact.Version),
+		IsMajorUpdate:  version.IsMajorUpgrade(currentVersion, artifact.Version),
 		DownloadURL:    artifact.DownloadURL,
 		DownloadDigest: artifact.DownloadDigest,
 	}, nil
+}
+
+// caskInstalledVersion selects the bundle version corresponding to a cask's
+// version scheme. Casks do not say which plist key they use, so only prefer the
+// build for an exact match or a numeric build suffix shared with the cask.
+// Comparing every cask against both versions would hide real releases when an
+// app uses an unrelated (and numerically much larger) internal build counter.
+func caskInstalledVersion(shortVersion, buildVersion, latest string) string {
+	if buildVersion == "" || latest == shortVersion {
+		return shortVersion
+	}
+	if shortVersion == "" || latest == buildVersion {
+		return buildVersion
+	}
+
+	short, build, cask := numericVersionParts(shortVersion), numericVersionParts(buildVersion), numericVersionParts(latest)
+	if len(short) == 0 || len(build) == 0 || len(build) != len(cask) {
+		return shortVersion
+	}
+
+	// A build may append components to the installed short version: 1.2.3.40.
+	if len(build) > len(short) && slices.Equal(build[:len(short)], short) {
+		return buildVersion
+	}
+
+	// Some version schemes replace the last release component with a build
+	// counter or date, e.g. 3.7.2 vs 3.7.50321.
+	// Require a shared installed release prefix and at least three extra digits
+	// in both build suffixes, so an ordinary patch increment still uses short.
+	last := len(short) - 1
+	if len(short) == len(build) && last > 0 && slices.Equal(short[:last], build[:last]) &&
+		len(build[last]) >= len(short[last])+3 && len(cask[last]) >= len(short[last])+3 {
+		return buildVersion
+	}
+	return shortVersion
+}
+
+func numericVersionParts(v string) []string {
+	parts := strings.Split(v, ".")
+	for i, part := range parts {
+		if part == "" || strings.IndexFunc(part, func(r rune) bool { return r < '0' || r > '9' }) != -1 {
+			return nil
+		}
+		n, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return nil
+		}
+		parts[i] = strconv.FormatUint(n, 10)
+	}
+	return parts
 }
 
 // parseBrewInfo extracts the version and download artifact from brew info JSON

@@ -94,6 +94,54 @@ func TestBrewInfoChecker_CheckNoUpdate(t *testing.T) {
 	}
 }
 
+func TestBrewInfoChecker_BuildVersions(t *testing.T) {
+	for _, tt := range []struct {
+		name, current, build, latest string
+		wantUpdate                   bool
+	}{
+		{"Office same build", "16.113.4", "16.113.26100421", "16.113.26100421", false},
+		{"Outlook older cask", "16.113.4", "16.113.26100421", "16.113.26091740", false},
+		{"Office newer build", "16.113.4", "16.113.26100421", "16.113.26100500", true},
+		{"Office newer minor", "16.113.4", "16.113.26100421", "16.114.26101000", true},
+		{"Office older minor", "16.113.4", "16.113.26100421", "16.112.26090100", false},
+		{"extra build component same", "1.2.3", "1.2.3.40", "1.2.3.40", false},
+		{"extra build component older", "1.2.3", "1.2.3.40", "1.2.3.39", false},
+		{"extra build component newer", "1.2.3", "1.2.3.40", "1.2.3.41", true},
+		{"missing installed build", "16.113.4", "", "16.113.26100421", true},
+		{"unrelated numeric build", "1.2.3", "88413", "1.2.4", true},
+		{"unrelated dotted build", "1.2", "900.0.0", "1.3.0", true},
+		{"short version cask with dotted build", "1.2.3", "1.2.3000", "1.2.4", true},
+		{"short version cask with long build", "1.2.3", "1.2.30000", "1.2.4", true},
+		{"short version already current", "1.2.3", "1.2.30000", "1.2.3", false},
+		{"numeric build cask match", "1.2.3", "88413", "88413", false},
+		{"composite cask still uses short version", "4.59.0", "218000", "4.60.1,218372", true},
+		{"generic counter older", "3.7.2", "3.7.50321", "3.7.50320", false},
+		{"generic counter newer", "3.7.2", "3.7.50321", "3.7.50322", true},
+		{"two component counter older", "8.12", "8.705001", "8.705000", false},
+		{"two component counter newer", "8.12", "8.705001", "8.705002", true},
+		{"four component counter older", "2.4.6.8", "2.4.6.45678", "2.4.6.45677", false},
+		{"four component counter newer", "2.4.6.8", "2.4.6.45678", "2.4.6.45679", true},
+		{"multiple appended components older", "7.3", "7.3.12.5", "7.3.12.4", false},
+		{"multiple appended components newer", "7.3", "7.3.12.5", "7.3.12.6", true},
+		{"prerelease promotion with unrelated build", "2.1.0-beta.1", "70245", "2.1.0", true},
+		{"unrelated hash build", "2.1.0", "abcdef01", "2.1.1", true},
+		{"unrelated release prefix", "3.7.2", "9.7.50321", "3.7.50322", true},
+		{"missing short version uses build", "", "725", "725", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &MockCmdRunner{Output: []byte(fmt.Sprintf(`{"casks":[{"version":%q}]}`, tt.latest))}
+			a := &app.App{Name: "Example Editor", BundleID: "org.example.editor", Version: tt.current, Build: tt.build, CaskName: "example-editor"}
+			result, err := NewBrewInfoChecker(runner).Check(context.Background(), a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.HasUpdate != tt.wantUpdate {
+				t.Errorf("HasUpdate = %v, want %v (short %s, build %s, cask %s)", result.HasUpdate, tt.wantUpdate, tt.current, tt.build, tt.latest)
+			}
+		})
+	}
+}
+
 func TestBrewInfoChecker_CompositeVersion(t *testing.T) {
 	jsonResp := `{"casks":[{"token":"docker","version":"4.60.1,218372"}]}`
 	runner := &MockCmdRunner{Output: []byte(jsonResp)}

@@ -2,12 +2,91 @@ package checker
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/lu-zhengda/updater/internal/app"
 )
+
+func TestSparkleChecker_BuildVersions(t *testing.T) {
+	for _, placement := range []string{"enclosure", "item"} {
+		t.Run(placement, func(t *testing.T) {
+			for _, tt := range []struct {
+				name, current, build, short, feedBuild string
+				wantUpdate, wantStale, wantMajor       bool
+			}{
+				{"Arc same build", "1.168.0", "88413", "1.168.0 (88413)", "88413", false, false, false},
+				{"Dia same build", "1.52.0", "88431", "1.52.0 (88431)", "88431", false, false, false},
+				{"newer build same short version", "1.168.0", "88413", "1.168.0", "88414", true, false, false},
+				{"older build same short version", "1.168.0", "88413", "1.168.0 (88412)", "88412", false, true, false},
+				{"build authoritative over display", "1.168.0", "88413", "1.169.0", "88413", false, false, false},
+				{"major release decorated display", "1.168.0", "88413", "2.0.0 (90000)", "90000", true, false, true},
+				{"no installed build same release", "1.168.0", "", "1.168.0 (88413)", "88413", false, false, false},
+				{"no installed build newer release", "1.168.0", "", "1.169.0 (88414)", "88414", true, false, false},
+				{"no feed build same release", "1.168.0", "88413", "1.168.0 (88413)", "", false, false, false},
+				{"no builds older release", "1.168.0", "", "1.167.0 (88412)", "", false, true, false},
+				{"no short version same build", "1.168.0", "88413", "", "88413", false, false, false},
+				{"no short version newer build", "1.168.0", "88413", "", "88414", true, false, false},
+				{"no short version older build", "1.168.0", "88413", "", "88412", false, true, false},
+				{"build only semver fallback", "1.0.0", "", "", "2.0.0", true, false, true},
+				{"generic dotted build same", "7.3", "42.7.9", "7.3 (42.7.9)", "42.7.9", false, false, false},
+				{"generic dotted build newer", "7.3", "42.7.9", "7.3 (42.7.10)", "42.7.10", true, false, false},
+				{"generic dotted build older", "7.3", "42.7.9", "7.3 (42.7.8)", "42.7.8", false, true, false},
+				{"generic counter newer", "4.2.1", "700", "4.2.1", "701", true, false, false},
+				{"generic dotted suffix fallback", "7.3", "", "7.3 (42.7.9)", "", false, false, false},
+				{"generic prerelease fallback", "2.1.0-beta.1", "", "2.1.0 (700)", "", true, false, false},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					item := fmt.Sprintf(`<enclosure url="https://example.com/app.zip" sparkle:shortVersionString="%s" sparkle:version="%s" />`, tt.short, tt.feedBuild)
+					if placement == "item" {
+						item = fmt.Sprintf(`<sparkle:shortVersionString>%s</sparkle:shortVersionString><sparkle:version>%s</sparkle:version><enclosure url="https://example.com/app.zip" />`, tt.short, tt.feedBuild)
+					}
+					ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+						fmt.Fprintf(w, `<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"><channel><item>%s</item></channel></rss>`, item)
+					}))
+					defer ts.Close()
+					a := &app.App{Name: "Example Editor", BundleID: "org.example.editor", Version: tt.current, Build: tt.build, FeedURL: ts.URL}
+					result, err := NewSparkleChecker(ts.Client()).Check(context.Background(), a)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if result.HasUpdate != tt.wantUpdate || result.StaleSource != tt.wantStale || result.IsMajorUpdate != tt.wantMajor {
+						t.Errorf("got update/stale/major = %v/%v/%v, want %v/%v/%v", result.HasUpdate, result.StaleSource, result.IsMajorUpdate, tt.wantUpdate, tt.wantStale, tt.wantMajor)
+					}
+					wantLatest := tt.short
+					if wantLatest == "" {
+						wantLatest = tt.feedBuild
+					}
+					if result.CurrentVersion != tt.current || result.LatestVersion != wantLatest || result.DownloadURL != "https://example.com/app.zip" {
+						t.Errorf("display versions or download changed: %+v", result)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestFindBestItem_BuildVersions(t *testing.T) {
+	older := sparkleItem{Version: "88413", ShortVersionString: "1.168.0", Enclosure: sparkleEnclosure{URL: "https://example.com/older.zip"}}
+	newer := sparkleItem{Version: "88414", ShortVersionString: "1.168.0", Enclosure: sparkleEnclosure{URL: "https://example.com/newer.zip"}}
+	for _, items := range [][]sparkleItem{{older, newer}, {newer, older}} {
+		if got := findBestItem(items, "27.0"); got != newer {
+			t.Errorf("selected %+v, want newest build %+v", got, newer)
+		}
+	}
+}
+
+func TestFindBestItem_MissingBuild(t *testing.T) {
+	older := sparkleItem{Version: "88413", ShortVersionString: "1.168.0 (88413)", Enclosure: sparkleEnclosure{URL: "https://example.com/older.zip"}}
+	newer := sparkleItem{ShortVersionString: "1.169.0", Enclosure: sparkleEnclosure{URL: "https://example.com/newer.zip"}}
+	for _, items := range [][]sparkleItem{{older, newer}, {newer, older}} {
+		if got := findBestItem(items, "27.0"); got != newer {
+			t.Errorf("selected %+v, want newer release %+v", got, newer)
+		}
+	}
+}
 
 func TestSparkleChecker_Name(t *testing.T) {
 	c := NewSparkleChecker(nil)
