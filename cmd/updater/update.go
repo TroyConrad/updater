@@ -545,7 +545,7 @@ func quitAppIfRunning(ctx context.Context, a *app.App, runner checker.CmdRunner)
 
 	fmt.Printf("  Quitting %s...\n", a.Name)
 	_, _ = runner.Run(ctx, "osascript", "-e",
-		fmt.Sprintf(`tell application "%s" to quit`, a.Name))
+		fmt.Sprintf(`tell application "%s" to quit`, escapeAppleScript(a.Name)))
 
 	// Wait for the process to exit (poll up to 5 seconds).
 	for i := 0; i < 10; i++ {
