@@ -59,6 +59,7 @@ type App struct {
 	UvNonRegistry          bool   // true when the uv tool was installed from git/path/url, not PyPI
 	UvPinned               bool   // true when the uv tool requirement pins an exact version (==)
 	CargoCrate             string // Crate name installed via `cargo install`
+	CargoNonRegistry       bool   // true when the crate was installed from git, a path, or another registry, not crates.io
 	ElectronUpdateURL      string // Generic update server base URL from app-update.yml
 	ElectronUpdateFormat   string // empty: latest-mac.yml; vscode: update API; squirrel: RELEASES.json
 	ElectronUpdateChannel  string // product.json quality for VS Code-compatible update APIs
