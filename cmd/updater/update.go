@@ -479,6 +479,14 @@ func tryDirectInstall(ctx context.Context, r *checker.UpdateResult, runner check
 	if ctx.Err() != nil {
 		return err, rolledBack // cancellation is not a request for manual handoff
 	}
+	// A rejected artifact must not be offered for manual install. Security
+	// checks run before the installed app is touched, so reopen it as-is.
+	if installer.IsSecurityFailure(err) {
+		if wasRunning {
+			_, _ = runner.Run(ctx, "open", "-a", r.App.Path)
+		}
+		return fmt.Errorf("automatic update blocked: %w; the download was not opened for manual install", err), rolledBack
+	}
 	// Sparkle/GitHub fall back to the download page; other desktop sources
 	// open the installed app so its own updater can take over.
 	openArgs := []string{"-a", r.App.Path}
