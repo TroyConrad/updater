@@ -224,11 +224,12 @@ func DiscoverCargoCrates(ctx context.Context, runner checker.CmdRunner) ([]*app.
 	apps := make([]*app.App, 0, len(crates))
 	for _, name := range names {
 		apps = append(apps, &app.App{
-			Name:       name,
-			BundleID:   "cargo.crate." + name,
-			Version:    crates[name],
-			Source:     app.SourceCargo,
-			CargoCrate: name,
+			Name:             name,
+			BundleID:         "cargo.crate." + name,
+			Version:          crates[name].Version,
+			Source:           app.SourceCargo,
+			CargoCrate:       name,
+			CargoNonRegistry: crates[name].NonRegistry,
 		})
 	}
 	return apps, nil

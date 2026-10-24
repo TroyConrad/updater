@@ -195,7 +195,7 @@ func TestListInstalledCargoCrates(t *testing.T) {
 		name    string
 		output  []byte
 		err     error
-		want    map[string]string
+		want    map[string]CargoCrateInfo
 		wantErr bool
 	}{
 		{
@@ -210,37 +210,52 @@ cargo-edit v0.12.2:
 ripgrep v14.1.0:
     rg
 `),
-			want: map[string]string{
-				"bat":        "0.24.0",
-				"cargo-edit": "0.12.2",
-				"ripgrep":    "14.1.0",
+			want: map[string]CargoCrateInfo{
+				"bat":        {Version: "0.24.0"},
+				"cargo-edit": {Version: "0.12.2"},
+				"ripgrep":    {Version: "14.1.0"},
 			},
 		},
 		{
 			name:   "no crates installed",
 			output: []byte(""),
-			want:   map[string]string{},
+			want:   map[string]CargoCrateInfo{},
 		},
 		{
 			name: "crate installed from local path",
 			output: []byte(`mytool v0.1.0 (/Users/me/dev/mytool):
     mytool
 `),
-			want: map[string]string{"mytool": "0.1.0"},
+			want: map[string]CargoCrateInfo{"mytool": {Version: "0.1.0", NonRegistry: true}},
 		},
 		{
 			name: "crate installed from git",
 			output: []byte(`gitcrate v2.0.0 (https://github.com/owner/repo#abcdef):
     gitcrate
 `),
-			want: map[string]string{"gitcrate": "2.0.0"},
+			want: map[string]CargoCrateInfo{"gitcrate": {Version: "2.0.0", NonRegistry: true}},
 		},
 		{
 			name: "crate name containing v",
 			output: []byte(`cargo-nextest v0.9.72:
     cargo-nextest
 `),
-			want: map[string]string{"cargo-nextest": "0.9.72"},
+			want: map[string]CargoCrateInfo{"cargo-nextest": {Version: "0.9.72"}},
+		},
+		{
+			name: "mixed registry and non-registry crates",
+			output: []byte(`ripgrep v14.1.0:
+    rg
+internal-cli v1.2.0 (https://git.example.com/acme/internal-cli#0a1b2c3d):
+    internal-cli
+private-tool v0.3.0 (registry ` + "`acme`" + `):
+    private-tool
+`),
+			want: map[string]CargoCrateInfo{
+				"ripgrep":      {Version: "14.1.0"},
+				"internal-cli": {Version: "1.2.0", NonRegistry: true},
+				"private-tool": {Version: "0.3.0", NonRegistry: true},
+			},
 		},
 		{
 			name:    "cargo command fails",
@@ -265,11 +280,11 @@ ripgrep v14.1.0:
 			if len(got) != len(tt.want) {
 				t.Fatalf("got %d crates (%v), want %d (%v)", len(got), got, len(tt.want), tt.want)
 			}
-			for name, wantVer := range tt.want {
-				if gotVer, ok := got[name]; !ok {
+			for name, want := range tt.want {
+				if gotInfo, ok := got[name]; !ok {
 					t.Errorf("missing crate %q", name)
-				} else if gotVer != wantVer {
-					t.Errorf("crate %q version = %q, want %q", name, gotVer, wantVer)
+				} else if gotInfo != want {
+					t.Errorf("crate %q = %+v, want %+v", name, gotInfo, want)
 				}
 			}
 		})
@@ -278,29 +293,70 @@ ripgrep v14.1.0:
 
 func TestParseCargoInstallLine(t *testing.T) {
 	tests := []struct {
-		line     string
-		wantName string
-		wantVer  string
-		wantOK   bool
+		line            string
+		wantName        string
+		wantVer         string
+		wantNonRegistry bool
+		wantOK          bool
 	}{
-		{"ripgrep v14.1.0:", "ripgrep", "14.1.0", true},
-		{"cargo-edit v0.12.2:", "cargo-edit", "0.12.2", true},
-		{"cargo-nextest v0.9.72:", "cargo-nextest", "0.9.72", true},
-		{"mytool v0.1.0 (/Users/me/dev/mytool):", "mytool", "0.1.0", true},
-		{"gitcrate v2.0.0 (https://github.com/owner/repo#abc):", "gitcrate", "2.0.0", true},
-		{"    rg", "", "", false},          // binary line, no colon
-		{"ripgrep v14.1.0", "", "", false}, // missing trailing colon
-		{"no-version-here:", "", "", false},
-		{"", "", "", false},
-		{"weird vNotAVersion:", "", "", false},
+		{"ripgrep v14.1.0:", "ripgrep", "14.1.0", false, true},
+		{"cargo-edit v0.12.2:", "cargo-edit", "0.12.2", false, true},
+		{"cargo-nextest v0.9.72:", "cargo-nextest", "0.9.72", false, true},
+		{"mytool v0.1.0 (/Users/me/dev/mytool):", "mytool", "0.1.0", true, true},
+		{"gitcrate v2.0.0 (https://github.com/owner/repo#abc):", "gitcrate", "2.0.0", true, true},
+		{"private-tool v0.3.0 (registry `acme`):", "private-tool", "0.3.0", true, true},
+		{"mytool v0.1.0 (/Users/me/dev/my v2 tool):", "mytool", "0.1.0", true, true}, // " v" inside a path
+		{"    rg", "", "", false, false},                                             // binary line, no colon
+		{"ripgrep v14.1.0", "", "", false, false},                                    // missing trailing colon
+		{"no-version-here:", "", "", false, false},
+		{"", "", "", false, false},
+		{"weird vNotAVersion:", "", "", false, false},
+		{"weird 14.1.0:", "", "", false, false}, // version without v prefix
 	}
 	for _, tt := range tests {
 		t.Run(tt.line, func(t *testing.T) {
-			name, ver, ok := parseCargoInstallLine(tt.line)
-			if ok != tt.wantOK || name != tt.wantName || ver != tt.wantVer {
-				t.Errorf("parseCargoInstallLine(%q) = (%q, %q, %v), want (%q, %q, %v)",
-					tt.line, name, ver, ok, tt.wantName, tt.wantVer, tt.wantOK)
+			name, info, ok := parseCargoInstallLine(tt.line)
+			if ok != tt.wantOK || name != tt.wantName || info.Version != tt.wantVer || info.NonRegistry != tt.wantNonRegistry {
+				t.Errorf("parseCargoInstallLine(%q) = (%q, %+v, %v), want (%q, %q, nonRegistry=%v, %v)",
+					tt.line, name, info, ok, tt.wantName, tt.wantVer, tt.wantNonRegistry, tt.wantOK)
 			}
 		})
+	}
+}
+
+func TestCargoCheckSkipsNonRegistryCrateWithoutQueryingCratesIO(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("crates.io must not be queried for a non-registry crate: %s", r.URL.Path)
+		_, _ = w.Write([]byte(`{"crate":{"max_stable_version":"99.0.0","newest_version":"99.0.0"}}`))
+	}))
+	defer srv.Close()
+
+	c := NewCargoChecker(srv.Client(), srv.URL)
+	a := &app.App{Name: "internal-cli", Version: "1.2.0", Source: app.SourceCargo, CargoCrate: "internal-cli", CargoNonRegistry: true}
+	result, err := c.Check(context.Background(), a)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.HasUpdate || result.LatestVersion != "1.2.0" || result.IsMajorUpdate {
+		t.Fatalf("non-registry crate reported an update: %+v", result)
+	}
+}
+
+func TestCargoCheckStillQueriesRegistryCrates(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{"crate":{"max_stable_version":"15.0.0","newest_version":"15.0.0"}}`))
+	}))
+	defer srv.Close()
+
+	c := NewCargoChecker(srv.Client(), srv.URL)
+	a := &app.App{Name: "ripgrep", Version: "14.1.0", Source: app.SourceCargo, CargoCrate: "ripgrep"}
+	result, err := c.Check(context.Background(), a)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if hits != 1 || !result.HasUpdate || result.LatestVersion != "15.0.0" {
+		t.Fatalf("registry crate check = %+v (hits %d)", result, hits)
 	}
 }

@@ -129,6 +129,18 @@ func (c *CargoChecker) Check(ctx context.Context, a *app.App) (*UpdateResult, er
 		return nil, fmt.Errorf("failed to check cargo update: no crate name for %s", a.Name)
 	}
 
+	// crates.io has no release for a git/path crate, and a crates.io crate
+	// with the same name is a different package that must not replace it.
+	if a.CargoNonRegistry {
+		return &UpdateResult{
+			App:            a,
+			Source:         "cargo",
+			CurrentVersion: a.Version,
+			LatestVersion:  a.Version,
+			HasUpdate:      false,
+		}, nil
+	}
+
 	latest, err := c.fetchLatestVersion(ctx, a.CargoCrate)
 	if err != nil {
 		return nil, err
@@ -144,28 +156,32 @@ func (c *CargoChecker) Check(ctx context.Context, a *app.App) (*UpdateResult, er
 	}, nil
 }
 
-// ListInstalledCargoCrates runs `cargo install --list` and returns a map of
-// crate name to installed version. The expected output format is:
+// CargoCrateInfo is one `cargo install --list` entry.
+type CargoCrateInfo struct {
+	Version     string
+	NonRegistry bool // installed from git, a local path, or a registry other than crates.io
+}
+
+// ListInstalledCargoCrates runs `cargo install --list` and returns the
+// installed crates keyed by name. The expected output format is:
 //
 //	bat v0.24.0:
 //	    bat
-//	cargo-edit v0.12.2:
-//	    cargo-add
-//	    cargo-upgrade
-//	ripgrep v14.1.0:
-//	    rg
+//	mytool v0.1.0 (/Users/me/dev/mytool):
+//	    mytool
+//	gitcrate v2.0.0 (https://github.com/owner/repo#abcdef):
+//	    gitcrate
 //
 // Crate lines are unindented and end with a colon; the indented lines beneath
-// each describe the binaries it installs and are ignored. Crates installed from
-// a git or local path source carry a trailing "(source)" annotation, which is
-// stripped from the version.
-func ListInstalledCargoCrates(ctx context.Context, runner CmdRunner) (map[string]string, error) {
+// each describe the binaries it installs and are ignored. Cargo prints a
+// "(source)" annotation for every package that did not come from crates.io.
+func ListInstalledCargoCrates(ctx context.Context, runner CmdRunner) (map[string]CargoCrateInfo, error) {
 	output, err := runner.Run(ctx, "cargo", "install", "--list")
 	if err != nil {
 		return nil, fmt.Errorf("failed to run cargo install --list: %w", err)
 	}
 
-	crates := make(map[string]string)
+	crates := make(map[string]CargoCrateInfo)
 	for _, line := range strings.Split(string(output), "\n") {
 		if line == "" {
 			continue
@@ -175,45 +191,39 @@ func ListInstalledCargoCrates(ctx context.Context, runner CmdRunner) (map[string
 			continue
 		}
 
-		name, ver, ok := parseCargoInstallLine(strings.TrimRight(line, " \t"))
+		name, info, ok := parseCargoInstallLine(strings.TrimRight(line, " \t"))
 		if !ok {
 			continue
 		}
-		crates[name] = ver
+		crates[name] = info
 	}
 	return crates, nil
 }
 
-// parseCargoInstallLine extracts (name, version) from a crate header line like
+// parseCargoInstallLine extracts the crate from a header line like
 // "ripgrep v14.1.0:" or "cargo-watch v8.4.0 (/path):". Returns ok=false when
 // the line doesn't match the expected shape.
-func parseCargoInstallLine(line string) (string, string, bool) {
+func parseCargoInstallLine(line string) (string, CargoCrateInfo, bool) {
 	// Crate header lines always end with a colon.
 	if !strings.HasSuffix(line, ":") {
-		return "", "", false
+		return "", CargoCrateInfo{}, false
 	}
 	line = strings.TrimSuffix(line, ":")
 
-	// Use the last " v" so crate names containing "v" still parse.
-	idx := strings.LastIndex(line, " v")
-	if idx <= 0 {
-		return "", "", false
+	// Crate names cannot contain spaces, so the first space ends the name even
+	// when a source path contains " v".
+	name, rest, ok := strings.Cut(line, " ")
+	if !ok || name == "" {
+		return "", CargoCrateInfo{}, false
 	}
-	name := strings.TrimSpace(line[:idx])
-	ver := strings.TrimSpace(strings.TrimPrefix(line[idx+1:], "v"))
-
-	// Strip any source annotation following the version (e.g. " (/path)" or
-	// " (https://github.com/...)") that appears for git/path installs.
-	if sp := strings.IndexAny(ver, " ("); sp >= 0 {
-		ver = strings.TrimSpace(ver[:sp])
+	ver, source, _ := strings.Cut(rest, " ")
+	if !strings.HasPrefix(ver, "v") {
+		return "", CargoCrateInfo{}, false
 	}
-
-	if name == "" || ver == "" {
-		return "", "", false
-	}
+	ver = strings.TrimPrefix(ver, "v")
 	// The version must start with a digit to qualify.
-	if ver[0] < '0' || ver[0] > '9' {
-		return "", "", false
+	if ver == "" || ver[0] < '0' || ver[0] > '9' {
+		return "", CargoCrateInfo{}, false
 	}
-	return name, ver, true
+	return name, CargoCrateInfo{Version: ver, NonRegistry: strings.TrimSpace(source) != ""}, true
 }

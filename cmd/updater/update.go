@@ -369,6 +369,9 @@ func executeUpdate(ctx context.Context, r *checker.UpdateResult, runner checker.
 		if r.App.CargoCrate == "" {
 			return fmt.Errorf("no cargo crate name for %s", r.App.Name), false
 		}
+		if r.App.CargoNonRegistry {
+			return fmt.Errorf("cargo crate %s was not installed from crates.io", r.App.CargoCrate), false
+		}
 		// `cargo install <crate>` upgrades in place when a newer version exists.
 		output, err := runner.Run(ctx, "cargo", "install", r.App.CargoCrate)
 		if err != nil {
