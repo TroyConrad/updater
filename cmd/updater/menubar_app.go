@@ -220,8 +220,12 @@ func (m *menubarApp) notifyNewUpdates(updatable []*checker.UpdateResult) {
 		msg = fmt.Sprintf("%s and %d more", strings.Join(fresh[:3], ", "), len(fresh)-3)
 	}
 	title := fmt.Sprintf("%d update(s) available", len(fresh))
-	script := fmt.Sprintf("display notification %q with title %q", msg, title)
-	_ = exec.Command("osascript", "-e", script).Run()
+	_ = exec.Command("osascript", "-e", menubarNotificationScript(msg, title)).Run()
+}
+
+// Go's %q escapes are not AppleScript escapes, so app names use escapeAppleScript.
+func menubarNotificationScript(msg, title string) string {
+	return fmt.Sprintf(`display notification "%s" with title "%s"`, escapeAppleScript(msg), escapeAppleScript(title))
 }
 
 // rebuild replaces the entire menu. updatable is the current update list;

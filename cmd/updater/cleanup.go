@@ -173,7 +173,7 @@ func getAppSize(ctx context.Context, runner checker.CmdRunner, path string) stri
 
 // moveToTrash moves an app to the Trash using Finder via osascript.
 func moveToTrash(ctx context.Context, runner checker.CmdRunner, a *app.App) error {
-	script := fmt.Sprintf(`tell application "Finder" to delete POSIX file "%s"`, a.Path)
+	script := fmt.Sprintf(`tell application "Finder" to delete POSIX file "%s"`, escapeAppleScript(a.Path))
 	_, err := runner.Run(ctx, "osascript", "-e", script)
 	if err != nil {
 		return fmt.Errorf("failed to move %s to trash: %w", a.Name, err)

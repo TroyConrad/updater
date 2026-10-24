@@ -250,7 +250,7 @@ func sendInteractiveNotification(ctx context.Context, runner checker.CmdRunner, 
 	script := fmt.Sprintf(
 		`set answer to display dialog "%s" with title "%s" buttons {"Dismiss", "Open Updater"} default button "Dismiss" giving up after 30
 if button returned of answer is "Open Updater" then
-    do shell script "%s ui &>/dev/null &"
+    do shell script quoted form of "%s" & " ui &>/dev/null &"
 end if`,
 		escapeAppleScript(body),
 		escapeAppleScript(title),
