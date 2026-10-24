@@ -47,6 +47,21 @@ func MayRequireRollback(err error) bool {
 	return errors.As(err, &installErr) && installErr.mayHaveModified
 }
 
+// securityError marks a download rejected by a transport, digest, filename,
+// or code-signing check. Such artifacts must never be handed to the user for
+// a manual install.
+type securityError struct{ err error }
+
+func (e *securityError) Error() string { return e.err.Error() }
+func (e *securityError) Unwrap() error { return e.err }
+
+// IsSecurityFailure reports whether an install failed because the download
+// was rejected by a security check rather than by a transient problem.
+func IsSecurityFailure(err error) bool {
+	var secErr *securityError
+	return errors.As(err, &secErr)
+}
+
 // Installer downloads and installs macOS app updates.
 type Installer struct {
 	runner   checker.CmdRunner
@@ -91,7 +106,7 @@ func (inst *Installer) Install(ctx context.Context, downloadURL, appPath, appNam
 // Returns the local file path. Uses Content-Disposition for filename if available.
 func (inst *Installer) download(ctx context.Context, rawURL, destDir, expectedDigest string) (string, error) {
 	if err := validateSecureURL(rawURL); err != nil {
-		return "", err
+		return "", &securityError{err}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -100,7 +115,11 @@ func (inst *Installer) download(ctx context.Context, rawURL, destDir, expectedDi
 
 	resp, err := inst.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to download: %w", err)
+		err = fmt.Errorf("failed to download: %w", err)
+		if errors.Is(err, errInsecureRedirect) {
+			return "", &securityError{err}
+		}
+		return "", err
 	}
 	defer resp.Body.Close()
 
@@ -108,7 +127,7 @@ func (inst *Installer) download(ctx context.Context, rawURL, destDir, expectedDi
 		return "", fmt.Errorf("download failed: status %d", resp.StatusCode)
 	}
 	if err := validateSecureURL(resp.Request.URL.String()); err != nil {
-		return "", fmt.Errorf("download redirected to an insecure URL: %w", err)
+		return "", &securityError{fmt.Errorf("download redirected to an insecure URL: %w", err)}
 	}
 	if resp.ContentLength > maxDownloadSize {
 		return "", fmt.Errorf("download is too large: %d bytes exceeds %d-byte limit", resp.ContentLength, maxDownloadSize)
@@ -119,11 +138,11 @@ func (inst *Installer) download(ctx context.Context, rawURL, destDir, expectedDi
 	// "/download/latest" often redirect to the actual artifact name.
 	filename, err := filenameFromResponse(resp, resp.Request.URL.String())
 	if err != nil {
-		return "", err
+		return "", &securityError{err}
 	}
 	localPath := filepath.Join(destDir, filename)
 	if err := ensureContainedPath(destDir, localPath); err != nil {
-		return "", err
+		return "", &securityError{err}
 	}
 
 	f, err := os.OpenFile(localPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -135,7 +154,7 @@ func (inst *Installer) download(ctx context.Context, rawURL, destDir, expectedDi
 	hasher, err := digestHasher(expectedDigest)
 	if err != nil {
 		_ = os.Remove(localPath)
-		return "", err
+		return "", &securityError{err}
 	}
 	var writer io.Writer = f
 	if hasher != nil {
@@ -156,7 +175,7 @@ func (inst *Installer) download(ctx context.Context, rawURL, destDir, expectedDi
 	}
 	if err := verifyDigest(expectedDigest, hasher); err != nil {
 		_ = os.Remove(localPath)
-		return "", err
+		return "", &securityError{err}
 	}
 
 	return localPath, nil
@@ -215,7 +234,7 @@ func (inst *Installer) installDMG(ctx context.Context, dmgPath, appPath, appName
 	}
 
 	if err := inst.verifier.VerifyReplacementApp(ctx, appPath, appBundle); err != nil {
-		return fmt.Errorf("downloaded app failed security verification: %w", err)
+		return &securityError{fmt.Errorf("downloaded app failed security verification: %w", err)}
 	}
 
 	return inst.replaceApp(ctx, appBundle, appPath)
@@ -311,7 +330,7 @@ func (inst *Installer) installZIP(ctx context.Context, zipPath, appPath, appName
 	}
 
 	if err := inst.verifier.VerifyReplacementApp(ctx, appPath, appBundle); err != nil {
-		return fmt.Errorf("downloaded app failed security verification: %w", err)
+		return &securityError{fmt.Errorf("downloaded app failed security verification: %w", err)}
 	}
 
 	return inst.replaceApp(ctx, appBundle, appPath)
@@ -320,7 +339,7 @@ func (inst *Installer) installZIP(ctx context.Context, zipPath, appPath, appName
 // installPKG runs the macOS package installer (requires sudo).
 func (inst *Installer) installPKG(ctx context.Context, pkgPath, appPath string) error {
 	if err := inst.verifier.VerifyInstallerPackage(ctx, appPath, pkgPath); err != nil {
-		return fmt.Errorf("downloaded package failed security verification: %w", err)
+		return &securityError{fmt.Errorf("downloaded package failed security verification: %w", err)}
 	}
 	_, err := inst.runner.Run(ctx, "sudo", "installer", "-pkg", pkgPath, "-target", "/")
 	if err != nil {
@@ -347,10 +366,15 @@ func secureDownloadClientWith(client *http.Client) *http.Client {
 		if len(via) >= 10 {
 			return fmt.Errorf("too many redirects")
 		}
-		return validateSecureURL(req.URL.String())
+		if err := validateSecureURL(req.URL.String()); err != nil {
+			return fmt.Errorf("%w: %w", errInsecureRedirect, err)
+		}
+		return nil
 	}
 	return &clone
 }
+
+var errInsecureRedirect = errors.New("redirect rejected")
 
 func validateSecureURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)

@@ -106,7 +106,9 @@ the vendor's installer. Explicit `source_overrides` still take precedence.
 Failed direct installs open the app or download page for manual updating and
 show the original failure alongside the handoff. The handoff is not recorded as
 a completed installation. Cancelled installs and failed replacements that could
-not be rolled back do not launch an external updater. Sources that only support
+not be rolled back do not launch an external updater. Downloads rejected by a
+security check (HTTPS, digest, or code-signing identity) are never opened for
+manual installation. Sources that only support
 an external updater still offer that manual action. Apps with
 authenticated or undocumented update protocols require a compatible adapter;
 Updater does not infer endpoints from arbitrary executable code.
